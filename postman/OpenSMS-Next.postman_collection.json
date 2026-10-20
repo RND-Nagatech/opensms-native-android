@@ -1,0 +1,154 @@
+{
+  "info": {
+    "_postman_id": "f8d735a0-20cf-4ac6-8cb3-9b374ac7e132",
+    "name": "OpenSMS Next - LAN testing",
+    "description": "Koleksi untuk menguji gateway SMS OpenSMS Next dari Postman. Sebelum memakai endpoint selain Health, isi apiKey dengan API key client yang memiliki scope sesuai request. Ganti baseUrl dengan alamat LAN yang tampil di Beranda aplikasi. Kirim SMS nyata dapat dikenai biaya operator; isi recipient dengan nomor uji milik Anda dalam format E.164. HTTP LAN tidak terenkripsi, gunakan hanya Wi-Fi tepercaya.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiKey}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://192.168.1.10:9292/v1",
+      "type": "string",
+      "description": "Ganti IP contoh ini dengan alamat LAN yang ditampilkan di Beranda OpenSMS Next."
+    },
+    {
+      "key": "apiKey",
+      "value": "",
+      "type": "string",
+      "description": "API key rahasia; masukkan di Postman secara lokal dan jangan commit atau bagikan collection yang berisi nilai ini."
+    },
+    {
+      "key": "recipient",
+      "value": "",
+      "type": "string",
+      "description": "Nomor tujuan Anda sendiri dalam format E.164, misalnya kode negara diikuti nomor tanpa spasi."
+    },
+    {
+      "key": "idempotencyKey",
+      "value": "",
+      "type": "string",
+      "description": "Dibuat otomatis saat pertama kali request Kirim SMS dijalankan; tetap sama untuk percobaan ulang payload yang sama."
+    },
+    {
+      "key": "messageId",
+      "value": "",
+      "type": "string",
+      "description": "Diisi otomatis dari respons Kirim SMS."
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health check (tanpa API key)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/health",
+        "description": "Pastikan gateway LAN sedang berjalan di aplikasi. Respons {\"ok\":true} hanya memastikan listener hidup; ini belum memastikan SIM siap mengirim."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Health merespons 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('Listener melaporkan ok', function () { pm.expect(pm.response.json().ok).to.eql(true); });"
+            ]
+          }
+        }
+      ],
+      "auth": { "type": "noauth" }
+    },
+    {
+      "name": "2. Lihat status gateway",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/status",
+        "description": "Memerlukan scope system:read. Periksa server=RUNNING dan sms_ready=true sebelum kirim."
+      }
+    },
+    {
+      "name": "3. Lihat SIM yang tersedia",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/sims",
+        "description": "Memerlukan scope system:read. Catat sim_id jika ingin memilih SIM tertentu; request Kirim SMS memakai SIM default jika sim_id tidak disertakan."
+      }
+    },
+    {
+      "name": "4. Kirim SMS",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "description": "Dibuat sekali dan dipakai ulang untuk mencegah pengiriman ganda saat retry." }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"to\": \"{{recipient}}\",\n  \"text\": \"Tes SMS dari OpenSMS Next.\",\n  \"request_delivery_report\": true,\n  \"client_reference\": \"postman-lan-test\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": "{{baseUrl}}/messages",
+        "description": "Memerlukan scope messages:write. Atur recipient terlebih dahulu. Nomor harus E.164 (contoh format Indonesia: +62...). Ganti teks sesuai kebutuhan. HTTP 202 berarti masuk antrean; status SMS kemudian diperiksa lewat request 5."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (!pm.collectionVariables.get('idempotencyKey')) {",
+              "  pm.collectionVariables.set('idempotencyKey', 'postman-' + pm.variables.replaceIn('{{$guid}}'));",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('SMS diterima atau merupakan replay aman', function () { pm.expect([200, 202]).to.include(pm.response.code); });",
+              "if ([200, 202].includes(pm.response.code)) {",
+              "  const body = pm.response.json();",
+              "  pm.collectionVariables.set('messageId', body.message_id);",
+              "  console.log('messageId:', body.message_id, 'status:', body.status);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Periksa status pesan terakhir",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/messages/{{messageId}}",
+        "description": "Memerlukan scope messages:read. Jalankan setelah request Kirim SMS. Status awal dapat QUEUED; status SENT belum menjamin pesan diterima, cek delivery_status juga."
+      }
+    },
+    {
+      "name": "6. Daftar pesan milik client ini",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/messages?limit=20",
+        "description": "Memerlukan scope messages:read. Respons hanya menampilkan pesan milik API client yang sedang dipakai."
+      }
+    }
+  ]
+}

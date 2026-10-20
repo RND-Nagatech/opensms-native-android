@@ -1,0 +1,7 @@
+.DS_Store
+*.iml
+.idea/
+local.properties
+**/.gradle/
+**/build/
+android-native/captures/

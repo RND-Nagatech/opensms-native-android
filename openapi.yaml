@@ -1,0 +1,352 @@
+openapi: 3.0.3
+info:
+  title: OpenSMS Next API
+  version: 1.0.0
+  description: |
+    Local Android SMS gateway REST API. For trusted LAN or a separately secured
+    TLS tunnel only. An accepted message is QUEUED, not delivered. SMS sending
+    may incur carrier fees. API keys must be kept secret. This is a design
+    contract for the native Kotlin implementation, not proof of deployed code.
+servers:
+  - url: http://127.0.0.1:9292/v1
+    description: Loopback development mode
+  - url: http://{device_ip}:9292/v1
+    description: User-enabled trusted LAN mode; transport is not encrypted
+    variables:
+      device_ip:
+        default: 192.168.1.10
+        description: Actual Android IP; example only
+security:
+  - BearerApiKey: []
+tags:
+  - name: Messages
+  - name: System
+paths:
+  /messages:
+    post:
+      tags: [Messages]
+      summary: Enqueue one SMS message
+      description: |
+        Store message and idempotency record atomically before returning 202.
+        200 with Idempotent-Replay=true for a repeated same-key/same-payload
+        request. 202 does not imply SMS sent or delivered.
+      operationId: enqueueMessage
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMessageRequest'
+      responses:
+        '202':
+          description: Message durably accepted into queue
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateMessageResponse'
+        '200':
+          description: Same key and same payload replayed; no duplicate send
+          headers:
+            Idempotent-Replay:
+              description: Always true for an idempotent replay
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateMessageResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [Messages]
+      summary: List own messages with cursor pagination
+      operationId: listMessages
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/MessageStatus' }
+        - name: sim_id
+          in: query
+          schema: { type: integer }
+        - name: created_from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: created_to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Messages scoped to authenticated client
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMessagesResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /messages/{message_id}:
+    get:
+      tags: [Messages]
+      summary: Retrieve a message's status (own client only)
+      operationId: getMessage
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema: { type: string, maxLength: 64 }
+      responses:
+        '200':
+          description: Message status and redacted metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageDetail'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /sims:
+    get:
+      tags: [System]
+      summary: List active SMS-capable SIM subscriptions
+      operationId: listSims
+      responses:
+        '200':
+          description: Available SIM metadata with no phone number/IMSI/ICCID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SimInfo'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /status:
+    get:
+      tags: [System]
+      summary: Authenticated gateway health details
+      operationId: getStatus
+      responses:
+        '200':
+          description: Sanitized gateway state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayStatus'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /health:
+    get:
+      tags: [System]
+      summary: Minimal non-sensitive HTTP health endpoint
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Process listener alive; does not mean a SIM can send SMS
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+components:
+  securitySchemes:
+    BearerApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: High-entropy bearer token with server-side verifier; scopes enforced in application.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique per client and logical SMS request. Retained for at least 24h.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]+$'
+  headers:
+    RequestId:
+      description: Server-generated request identifier for troubleshooting.
+      schema: { type: string }
+  schemas:
+    MessageStatus:
+      type: string
+      enum: [QUEUED, DISPATCHING, SENT, DELIVERED, FAILED, UNKNOWN, CANCELED]
+    DeliveryStatus:
+      type: string
+      enum: [PENDING, CONFIRMED, UNAVAILABLE, FAILED, UNKNOWN]
+    CreateMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [to, text]
+      properties:
+        to:
+          type: string
+          description: Recipient E.164 number
+          pattern: '^\+[1-9][0-9]{1,14}$'
+          example: '+628123456789'
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1600
+          description: Server enforces up to 10 actual SMS segments, potentially less than 1600 Unicode chars.
+        sim_id:
+          type: integer
+          description: Device-local active Android subscription ID; optional if admin preferred SIM configured.
+        request_delivery_report:
+          type: boolean
+          default: true
+        client_reference:
+          type: string
+          maxLength: 100
+    CreateMessageResponse:
+      type: object
+      required: [message_id, status, delivery_status, created_at, parts_total, links]
+      properties:
+        message_id:
+          type: string
+          example: '019aefb4-4d40-7c36-b72f-e934865740a1'
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        delivery_status:
+          $ref: '#/components/schemas/DeliveryStatus'
+        created_at:
+          type: string
+          format: date-time
+        parts_total:
+          type: integer
+          minimum: 1
+        links:
+          type: object
+          required: [self]
+          properties:
+            self: { type: string, example: '/v1/messages/019aefb4-4d40-7c36-b72f-e934865740a1' }
+    MessageDetail:
+      type: object
+      required: [message_id, to_masked, status, delivery_status, sim_id, parts_total, parts_sent, parts_delivered, created_at]
+      properties:
+        message_id: { type: string }
+        to_masked: { type: string, example: '+62812******89' }
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        delivery_status: { $ref: '#/components/schemas/DeliveryStatus' }
+        sim_id: { type: integer }
+        parts_total: { type: integer, minimum: 1 }
+        parts_sent: { type: integer, minimum: 0 }
+        parts_delivered: { type: integer, minimum: 0 }
+        client_reference: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        sent_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        last_error: { type: string, nullable: true }
+    MessageSummary:
+      type: object
+      required: [message_id, to_masked, status, delivery_status, created_at]
+      properties:
+        message_id: { type: string }
+        to_masked: { type: string }
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        delivery_status: { $ref: '#/components/schemas/DeliveryStatus' }
+        created_at: { type: string, format: date-time }
+    ListMessagesResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageSummary'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor; null means no more results
+    SimInfo:
+      type: object
+      required: [sim_id, slot_index, display_name, is_default, is_available]
+      properties:
+        sim_id: { type: integer }
+        slot_index: { type: integer }
+        display_name: { type: string }
+        is_default: { type: boolean }
+        is_available: { type: boolean }
+    GatewayStatus:
+      type: object
+      required: [server, sms_ready, pending_count, network, version]
+      properties:
+        server:
+          type: string
+          enum: [STOPPED, STARTING, RUNNING, DEGRADED, STOPPING, ERROR]
+        sms_ready: { type: boolean }
+        pending_count: { type: integer, minimum: 0 }
+        network: { type: string, enum: [LOOPBACK, LAN, UNAVAILABLE] }
+        version: { type: string }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id, details]
+          properties:
+            code: { type: string, example: SIM_UNAVAILABLE }
+            message: { type: string, example: 'Selected SIM is not available' }
+            request_id: { type: string }
+            details: { type: object, additionalProperties: true }
+  responses:
+    BadRequest:
+      description: Invalid JSON/request syntax
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Forbidden:
+      description: Scope, ownership, or policy restriction
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    NotFound:
+      description: Unknown or inaccessible message ID
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Conflict:
+      description: Idempotency-Key used with different payload
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    PayloadTooLarge:
+      description: Message or request body exceeds configured limits
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    ValidationError:
+      description: Request validation failed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    RateLimited:
+      description: Rate/queue policy limit exceeded
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 0 }
+          description: Suggested seconds before retry, when applicable
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Unavailable:
+      description: Selected SIM, permission, or gateway temporarily unavailable
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
